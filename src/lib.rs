@@ -9,34 +9,40 @@ pub use error::Result;
 use futures::task::{Spawn, SpawnError, SpawnExt};
 use serde::Serialize;
 use std::sync::Arc;
+use std::sync::RwLock;
 use uuid::Uuid;
+use zenoh::prelude::sync::SyncResolve;
+use zenoh::queryable::Query;
+use zenoh::sample::Sample;
+use zenoh::value::Value;
 use zenoh::{key_expr, prelude::KeyExpr, Session};
 
 lazy_static! {
     pub static ref INSTANCE_UUID: String = Uuid::new_v4().as_urn().to_string();
 }
 
-pub struct ZSharedValue<T: Serialize + Send + Sync + 'static> {
+pub struct ZSharedValue<T: Into<Value> + Send + Sync + 'static> {
     value: Arc<RwLock<T>>,
     name: String,
 }
 
-impl<T: Serialize + Send + Sync + 'static> ZSharedValue<T> {
-    pub fn new(
-        spawner: impl Spawn,
-        zsession: Session,
-        value: T,
-        workspace: KeyExpr,
-        name: String,
-    ) -> Result<Self> {
+impl<T: Into<Value> + Send + Sync + 'static> ZSharedValue<T> {
+    pub fn new(zsession: Session, value: T, workspace: KeyExpr, name: String) -> Result<Self> {
         let value = Arc::new(RwLock::new(value));
         let key_expr = workspace.join(&name)?.join(INSTANCE_UUID.as_str())?;
-        let queryable = zsession.declare_queryable(&key_expr).res_sync()?;
-        spawner.spawn({
-            let value = Arc::downgrade(&value);
-            // let key_expr =
-            async move { while let Some(value) = value.upgrade() {} }
-        })?;
+        let callback = {
+            let value = value.clone();
+            |query: Query| {
+                let value = value.read().unwrap();
+                let value: Value = (*value.read().unwrap()).into();
+                let sample = Sample::new(query.key_expr(), value);
+                query.reply(Ok(sample)).res_sync();
+            }
+        };
+        let queryable = zsession
+            .declare_queryable(&key_expr)
+            .callback(callback)
+            .res_sync()?;
         Ok(Self { value, name })
     }
     pub async fn update(&self, value: T) {
