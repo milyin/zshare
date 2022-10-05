@@ -32,6 +32,16 @@ pub trait Update {
     fn update(&mut self, command: Self::Command);
 }
 
+fn get_paths<'a>(workspace: &'a KeyExpr, name: &'a KeyExpr) -> (KeyExpr<'a>, KeyExpr<'a>) {
+    let path = workspace
+        .join(&name)?
+        .join(INSTANCE_ID.as_str())?
+        .join("data")?;
+    let query_path = path.join("data")?;
+    let pub_path = path.join("update")?;
+    (query_path, pub_path)
+}
+
 pub struct ZSharedValue<
     'a,
     DATA: Update<Command = COMMAND> + Serialize + Send + Sync + 'static,
@@ -57,12 +67,7 @@ impl<
         name: KeyExpr<'static>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(data));
-        let path = workspace
-            .join(&name)?
-            .join(INSTANCE_ID.as_str())?
-            .join("data")?;
-        let query_path = path.join("data")?;
-        let pub_path = path.join("update")?;
+        let (query_path, pub_path) = get_paths(&workspace, &name);
         let callback = {
             let data = data.clone();
             move |query: Query| {
@@ -97,6 +102,32 @@ impl<
         self.publisher.put(buf);
         let mut data = self.data.write().unwrap();
         data.update(command);
+    }
+}
+
+pub struct ZShareView<
+    'a,
+    DATA: Update<Command = COMMAND> + Serialize + Send + Sync + 'static,
+    COMMAND: Serialize,
+> {
+    data: Arc<RwLock<Option<DATA>>>,
+    name: KeyExpr<'static>,
+}
+
+impl<
+        'a,
+        DATA: Update<Command = COMMAND> + Serialize + Send + Sync + 'static,
+        COMMAND: Serialize,
+    > ZShareView<'a, DATA, COMMAND>
+{
+    pub fn new(zsession: &'a Session, workspace: KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
+        let data = Arc::new(RwLock::new(None));
+        let (query_path, pub_path) = get_paths(&workspace, &name);
+        let subscriber = zsession
+            .declare_subscriber(pub_path)
+            .callback(callback)
+            .res_sync()?;
+        Ok(Self { data, name })
     }
 }
 
