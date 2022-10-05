@@ -1,12 +1,12 @@
 use futures::task::SpawnError;
-use thiserror::Error
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
     Spawn(SpawnError),
     #[error(transparent)]
-    Zenoh(zenoh::Error)
+    Zenoh(zenoh::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
