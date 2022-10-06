@@ -7,7 +7,10 @@ pub use error::Error;
 pub use error::Result;
 
 use futures::task::{Spawn, SpawnError, SpawnExt};
+use rmp_serde::Deserializer;
 use rmp_serde::Serializer;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
 use serde::Serialize;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -20,6 +23,7 @@ use zenoh::publication::Publisher;
 use zenoh::queryable::Query;
 use zenoh::queryable::Queryable;
 use zenoh::sample::Sample;
+use zenoh::subscriber::Subscriber;
 use zenoh::value::Value;
 use zenoh::{key_expr, prelude::KeyExpr, Session};
 
@@ -107,26 +111,47 @@ impl<
 
 pub struct ZShareView<
     'a,
-    DATA: Update<Command = COMMAND> + Serialize + Send + Sync + 'static,
-    COMMAND: Serialize,
+    DATA: Default + Update<Command = COMMAND> + DeserializeOwned + Send + Sync + 'static,
+    COMMAND: DeserializeOwned,
 > {
-    data: Arc<RwLock<Option<DATA>>>,
+    data: Arc<RwLock<DATA>>,
     name: KeyExpr<'static>,
+    _subscriber: Subscriber<'a, ()>,
 }
 
 impl<
         'a,
-        DATA: Update<Command = COMMAND> + Serialize + Send + Sync + 'static,
-        COMMAND: Serialize,
+        DATA: Default + Update<Command = COMMAND> + DeserializeOwned + Send + Sync + 'static,
+        COMMAND: DeserializeOwned,
     > ZShareView<'a, DATA, COMMAND>
 {
     pub fn new(zsession: &'a Session, workspace: KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
-        let data = Arc::new(RwLock::new(None));
+        let data = Arc::new(RwLock::new(DATA::default()));
         let (query_path, pub_path) = get_paths(&workspace, &name);
+        let update_callback = {
+            let data = data.clone();
+            |sample| {
+                let buf: Vec<u8> = sample.payload.into();
+                let deserializer = Deserializer::new(buf.as_slice());
+                let mut data = data.write().unwrap();
+                let command: COMMAND = Deserialize::deserialize(&deserializer).unwrap();
+                data.update(command);
+            }
+        };
         let subscriber = zsession
             .declare_subscriber(pub_path)
-            .callback(callback)
+            .callback(update_callback)
             .res_sync()?;
+        let query = zsession.get(query_path).res_sync()?;
+        while let Ok(reply) = query.recv() {
+            if let Ok(sample) = reply.sample {
+                let buf: Vec<u8> = sample.payload.into();
+                let deserializer = Deserializer::new(buf.as_slice());
+                let mut data = data.write().unwrap();
+                *data = Deserialize::deserialize(&deserializer).unwrap();
+                break;
+            }
+        }
         Ok(Self { data, name })
     }
 }
