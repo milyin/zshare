@@ -1,0 +1,10 @@
+[package]
+name = "test"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+zenoh = { git = "https://github.com/eclipse-zenoh/zenoh.git" }
+async-std = "1.11.0"
+zshare = { path = "../.." }
+env_logger = "0.9.1"
