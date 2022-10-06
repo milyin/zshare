@@ -107,7 +107,7 @@ impl<
     }
 }
 
-pub struct ZShareView<
+pub struct ZSharedView<
     'a,
     DATA: Default + Update<Command = COMMAND> + DeserializeOwned + Send + Sync + 'static,
     COMMAND: DeserializeOwned,
@@ -121,9 +121,9 @@ impl<
         'a,
         DATA: Default + Update<Command = COMMAND> + DeserializeOwned + Send + Sync + 'static,
         COMMAND: DeserializeOwned,
-    > ZShareView<'a, DATA, COMMAND>
+    > ZSharedView<'a, DATA, COMMAND>
 {
-    pub fn new(zsession: &'a Session, workspace: KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
+    pub fn new(zsession: &'a Session, workspace: &KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
         let data = Arc::new(RwLock::new(DATA::default()));
         let (query_path, pub_path) = get_paths(&workspace, &name)?;
         let update_callback = {
@@ -155,6 +155,10 @@ impl<
             name,
             _subscriber,
         })
+    }
+
+    pub fn read(&self) -> RwLockReadGuard<DATA> {
+        self.data.read().unwrap()
     }
 }
 

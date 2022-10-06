@@ -8,3 +8,4 @@ zenoh = { git = "https://github.com/eclipse-zenoh/zenoh.git" }
 async-std = "1.11.0"
 zshare = { path = "../.." }
 env_logger = "0.9.1"
+serde = "1.0.145"
