@@ -6,7 +6,6 @@ mod error;
 pub use error::Error;
 pub use error::Result;
 
-use futures::task::{Spawn, SpawnError, SpawnExt};
 use rmp_serde::Deserializer;
 use rmp_serde::Serializer;
 use serde::de::DeserializeOwned;
@@ -17,15 +16,14 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use uuid::Uuid;
-use zenoh::handlers::Callback;
 use zenoh::prelude::sync::SyncResolve;
+use zenoh::prelude::SplitBuffer;
 use zenoh::publication::Publisher;
 use zenoh::queryable::Query;
 use zenoh::queryable::Queryable;
 use zenoh::sample::Sample;
 use zenoh::subscriber::Subscriber;
-use zenoh::value::Value;
-use zenoh::{key_expr, prelude::KeyExpr, Session};
+use zenoh::{prelude::KeyExpr, Session};
 
 lazy_static! {
     pub static ref INSTANCE_ID: String = Uuid::new_v4().as_urn().to_string();
@@ -36,14 +34,14 @@ pub trait Update {
     fn update(&mut self, command: Self::Command);
 }
 
-fn get_paths<'a>(workspace: &'a KeyExpr, name: &'a KeyExpr) -> (KeyExpr<'a>, KeyExpr<'a>) {
+fn get_paths(workspace: &KeyExpr, name: &KeyExpr) -> Result<(KeyExpr<'static>, KeyExpr<'static>)> {
     let path = workspace
         .join(&name)?
         .join(INSTANCE_ID.as_str())?
         .join("data")?;
     let query_path = path.join("data")?;
     let pub_path = path.join("update")?;
-    (query_path, pub_path)
+    Ok((query_path, pub_path))
 }
 
 pub struct ZSharedValue<
@@ -52,7 +50,7 @@ pub struct ZSharedValue<
     COMMAND: Serialize,
 > {
     data: Arc<RwLock<DATA>>,
-    name: KeyExpr<'static>,
+    name: KeyExpr<'a>,
     publisher: Publisher<'a>,
     _queryable: Queryable<'a, ()>,
     _command: PhantomData<COMMAND>,
@@ -67,11 +65,11 @@ impl<
     pub fn new(
         zsession: &'a Session,
         data: DATA,
-        workspace: KeyExpr,
-        name: KeyExpr<'static>,
+        workspace: &'a KeyExpr,
+        name: KeyExpr<'a>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(data));
-        let (query_path, pub_path) = get_paths(&workspace, &name);
+        let (query_path, pub_path) = get_paths(&workspace, &name)?;
         let callback = {
             let data = data.clone();
             move |query: Query| {
@@ -115,7 +113,7 @@ pub struct ZShareView<
     COMMAND: DeserializeOwned,
 > {
     data: Arc<RwLock<DATA>>,
-    name: KeyExpr<'static>,
+    name: KeyExpr<'a>,
     _subscriber: Subscriber<'a, ()>,
 }
 
@@ -127,32 +125,36 @@ impl<
 {
     pub fn new(zsession: &'a Session, workspace: KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
         let data = Arc::new(RwLock::new(DATA::default()));
-        let (query_path, pub_path) = get_paths(&workspace, &name);
+        let (query_path, pub_path) = get_paths(&workspace, &name)?;
         let update_callback = {
             let data = data.clone();
-            |sample| {
-                let buf: Vec<u8> = sample.payload.into();
-                let deserializer = Deserializer::new(buf.as_slice());
+            move |sample: Sample| {
+                let buf: Vec<u8> = sample.payload.contiguous().into();
+                let mut deserializer = Deserializer::new(buf.as_slice());
                 let mut data = data.write().unwrap();
-                let command: COMMAND = Deserialize::deserialize(&deserializer).unwrap();
+                let command: COMMAND = Deserialize::deserialize(&mut deserializer).unwrap();
                 data.update(command);
             }
         };
-        let subscriber = zsession
+        let _subscriber = zsession
             .declare_subscriber(pub_path)
             .callback(update_callback)
             .res_sync()?;
         let query = zsession.get(query_path).res_sync()?;
         while let Ok(reply) = query.recv() {
             if let Ok(sample) = reply.sample {
-                let buf: Vec<u8> = sample.payload.into();
-                let deserializer = Deserializer::new(buf.as_slice());
+                let buf: Vec<u8> = sample.payload.contiguous().into();
+                let mut deserializer = Deserializer::new(buf.as_slice());
                 let mut data = data.write().unwrap();
-                *data = Deserialize::deserialize(&deserializer).unwrap();
+                *data = Deserialize::deserialize(&mut deserializer).unwrap();
                 break;
             }
         }
-        Ok(Self { data, name })
+        Ok(Self {
+            data,
+            name,
+            _subscriber,
+        })
     }
 }
 
