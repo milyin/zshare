@@ -26,7 +26,7 @@ use zenoh::subscriber::Subscriber;
 use zenoh::{prelude::KeyExpr, Session};
 
 lazy_static! {
-    pub static ref INSTANCE_ID: String = Uuid::new_v4().as_urn().to_string();
+    pub static ref INSTANCE_ID: String = Uuid::new_v4().as_hyphenated().to_string();
 }
 
 pub trait Update {
@@ -34,11 +34,18 @@ pub trait Update {
     fn update(&mut self, command: Self::Command);
 }
 
-fn get_paths(workspace: &KeyExpr, name: &KeyExpr) -> Result<(KeyExpr<'static>, KeyExpr<'static>)> {
-    let path = workspace.join(&name)?.join(INSTANCE_ID.as_str())?;
-    let query_path = path.join("data")?;
-    let pub_path = path.join("update")?;
-    Ok((query_path, pub_path))
+pub fn get_data_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
+    Ok(workspace
+        .join(&name)?
+        .join(INSTANCE_ID.as_str())?
+        .join("data")?)
+}
+
+pub fn get_update_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
+    Ok(workspace
+        .join(&name)?
+        .join(INSTANCE_ID.as_str())?
+        .join("update")?)
 }
 
 pub struct ZSharedValue<
@@ -66,7 +73,8 @@ impl<
         name: KeyExpr<'a>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(data));
-        let (query_path, pub_path) = get_paths(&workspace, &name)?;
+        let data_path = get_data_path(&workspace, &name)?;
+        let update_path = get_update_path(&workspace, &name)?;
         let callback = {
             let data = data.clone();
             move |query: Query| {
@@ -78,10 +86,10 @@ impl<
             }
         };
         let _queryable = zsession
-            .declare_queryable(&query_path)
+            .declare_queryable(&data_path)
             .callback(callback)
             .res_sync()?;
-        let publisher = zsession.declare_publisher(pub_path).res_sync()?;
+        let publisher = zsession.declare_publisher(update_path).res_sync()?;
         Ok(Self {
             data,
             name,
@@ -126,7 +134,8 @@ impl<
 {
     pub fn new(zsession: &'a Session, workspace: &KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
         let data = Arc::new(RwLock::new(DATA::default()));
-        let (query_path, pub_path) = get_paths(&workspace, &name)?;
+        let data_path = get_data_path(&workspace, &name)?;
+        let update_path = get_update_path(&workspace, &name)?;
         let update_callback = {
             let data = data.clone();
             move |sample: Sample| {
@@ -138,10 +147,10 @@ impl<
             }
         };
         let _subscriber = zsession
-            .declare_subscriber(pub_path)
+            .declare_subscriber(update_path)
             .callback(update_callback)
             .res_sync()?;
-        let query = zsession.get(query_path).res_sync()?;
+        let query = zsession.get(data_path).res_sync()?;
         while let Ok(reply) = query.recv() {
             if let Ok(sample) = reply.sample {
                 let buf: Vec<u8> = sample.payload.contiguous().into();
@@ -166,83 +175,3 @@ impl<
         &self.name
     }
 }
-
-/*
-pub struct ZSharedValue<
-    DATA: AsRef<SNAPSHOT> + Send + Sync + 'static,
-    SNAPSHOT: Clone + Into<Value>,
-> {
-    value: Arc<RwLock<DATA>>,
-    name: String, // TODO: store as KeyExpr
-    _snapshot: PhantomData<SNAPSHOT>,
-}
-
-impl<DATA: AsRef<SNAPSHOT> + Send + Sync + 'static, SNAPSHOT: Clone + Into<Value>>
-    ZSharedValue<DATA, SNAPSHOT>
-{
-    pub fn new(zsession: Session, value: DATA, workspace: KeyExpr, name: String) -> Result<Self> {
-        let value = Arc::new(RwLock::new(value));
-        let key_expr = workspace.join(&name)?.join(INSTANCE_ID.as_str())?;
-        let callback = {
-            let value = value.clone();
-            move |query: Query| {
-                let value = value.read().unwrap();
-                let value: SNAPSHOT = value.as_ref().clone();
-                let value: Value = value.into();
-                let sample = Sample::new(query.key_expr().clone(), value);
-                query.reply(Ok(sample)).res_sync().unwrap();
-            }
-        };
-        let queryable = zsession
-            .declare_queryable(&key_expr)
-            .callback(callback)
-            .res_sync()?;
-        Ok(Self {
-            value,
-            name,
-            _snapshot: PhantomData::default(),
-        })
-    }
-    pub fn update(&self, value: DATA) {
-        *self.value.write().unwrap() = value; // TODO: use update function
-                                              // TODO: broadcast update
-    }
-}
-
-pub struct ZSharedReader<DATA: TryFrom<Value> + Send + Sync + 'static> {
-    value: Arc<RwLock<Option<DATA>>>,
-    name: String,
-}
-
-impl<DATA: From<Value> + Send + Sync + 'static> ZSharedReader<DATA> {
-    pub fn new(
-        zsession: Session,
-        value: DATA,
-        workspace: KeyExpr,
-        instance_id: String,
-        name: String,
-    ) -> Result<Self> {
-        let value = Arc::new(RwLock::new(None));
-        let key_expr = workspace.join(&name)?.join(instance_id.as_str())?;
-        let callback = {
-            let value = value.clone();
-            move |sample: Sample| {
-                if let Ok(new_value) = sample.value.try_into() {
-                    let mut value = value.write().unwrap();
-                    *value = Some(new_value);
-                }
-            }
-        };
-        let subscriber = zsession
-            .declare_subscriber(key_expr)
-            .callback(callback)
-            .res_sync()?;
-        Ok(Self { value, name })
-    }
-}
-
-#[async_std::test]
-async fn simple_test() {
-    println!("FOOOO");
-}
-*/
