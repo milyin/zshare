@@ -26,7 +26,11 @@ use zenoh::subscriber::Subscriber;
 use zenoh::{prelude::KeyExpr, Session};
 
 lazy_static! {
-    pub static ref INSTANCE_ID: String = Uuid::new_v4().as_hyphenated().to_string();
+    pub static ref INSTANCE_ID: KeyExpr<'static> = Uuid::new_v4()
+        .as_hyphenated()
+        .to_string()
+        .try_into()
+        .unwrap();
 }
 
 pub trait Update {
@@ -34,18 +38,20 @@ pub trait Update {
     fn update(&mut self, command: Self::Command);
 }
 
+fn get_path(workspace: &KeyExpr, name: &KeyExpr, key: &str) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(&INSTANCE_ID)?.join(&name)?.join(key)?)
+}
+
 pub fn get_data_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    Ok(workspace
-        .join(&name)?
-        .join(INSTANCE_ID.as_str())?
-        .join("data")?)
+    get_path(workspace, name, "data")
 }
 
 pub fn get_update_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    Ok(workspace
-        .join(&name)?
-        .join(INSTANCE_ID.as_str())?
-        .join("update")?)
+    get_path(workspace, name, "update")
+}
+
+pub fn get_id_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
+    get_path(workspace, name, "id")
 }
 
 pub struct ZSharedValue<
@@ -56,7 +62,8 @@ pub struct ZSharedValue<
     data: Arc<RwLock<DATA>>,
     name: KeyExpr<'a>,
     publisher: Publisher<'a>,
-    _queryable: Queryable<'a, ()>,
+    _queryable_data: Queryable<'a, ()>,
+    _queryable_id: Queryable<'a, ()>,
     _command: PhantomData<COMMAND>,
 }
 
@@ -75,7 +82,8 @@ impl<
         let data = Arc::new(RwLock::new(data));
         let data_path = get_data_path(&workspace, &name)?;
         let update_path = get_update_path(&workspace, &name)?;
-        let callback = {
+        let id_path = get_id_path(&workspace, &name)?;
+        let callback_data = {
             let data = data.clone();
             move |query: Query| {
                 let data = data.read().unwrap();
@@ -85,16 +93,25 @@ impl<
                 query.reply(Ok(sample)).res_sync().unwrap();
             }
         };
-        let _queryable = zsession
+        let callback_id = move |query: Query| {
+            let sample = Sample::new(query.key_expr().clone(), INSTANCE_ID.as_bytes());
+            query.reply(Ok(sample)).res_sync().unwrap();
+        };
+        let _queryable_data = zsession
             .declare_queryable(&data_path)
-            .callback(callback)
+            .callback(callback_data)
+            .res_sync()?;
+        let _queryable_id = zsession
+            .declare_queryable(&id_path)
+            .callback(callback_id)
             .res_sync()?;
         let publisher = zsession.declare_publisher(update_path).res_sync()?;
         Ok(Self {
             data,
             name,
             publisher,
-            _queryable,
+            _queryable_data,
+            _queryable_id,
             _command: PhantomData::default(),
         })
     }
@@ -132,7 +149,12 @@ impl<
         COMMAND: DeserializeOwned,
     > ZSharedView<'a, DATA, COMMAND>
 {
-    pub fn new(zsession: &'a Session, workspace: &KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
+    pub fn new(
+        zsession: &'a Session,
+        workspace: &KeyExpr,
+        id: &KeyExpr,
+        name: KeyExpr<'static>,
+    ) -> Result<Self> {
         let data = Arc::new(RwLock::new(DATA::default()));
         let data_path = get_data_path(&workspace, &name)?;
         let update_path = get_update_path(&workspace, &name)?;
