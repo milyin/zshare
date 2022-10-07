@@ -35,10 +35,7 @@ pub trait Update {
 }
 
 fn get_paths(workspace: &KeyExpr, name: &KeyExpr) -> Result<(KeyExpr<'static>, KeyExpr<'static>)> {
-    let path = workspace
-        .join(&name)?
-        .join(INSTANCE_ID.as_str())?
-        .join("data")?;
+    let path = workspace.join(&name)?.join(INSTANCE_ID.as_str())?;
     let query_path = path.join("data")?;
     let pub_path = path.join("update")?;
     Ok((query_path, pub_path))
@@ -98,10 +95,14 @@ impl<
         self.data.read().unwrap()
     }
 
+    pub fn name(&self) -> &KeyExpr {
+        &self.name
+    }
+
     pub fn update(&self, command: COMMAND) {
         let mut buf = Vec::new();
         command.serialize(&mut Serializer::new(&mut buf)).unwrap();
-        self.publisher.put(buf);
+        self.publisher.put(buf).res().unwrap();
         let mut data = self.data.write().unwrap();
         data.update(command);
     }
@@ -159,6 +160,10 @@ impl<
 
     pub fn read(&self) -> RwLockReadGuard<DATA> {
         self.data.read().unwrap()
+    }
+
+    pub fn name(&self) -> &KeyExpr {
+        &self.name
     }
 }
 

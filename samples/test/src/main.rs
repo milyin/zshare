@@ -1,4 +1,4 @@
-use async_std::io::{stdin, ReadExt};
+use async_std::io::ReadExt;
 use serde::{Deserialize, Serialize};
 use zenoh::prelude::{r#async::AsyncResolve, Config, KeyExpr};
 use zshare::{Update, ZSharedValue, ZSharedView};
@@ -32,7 +32,7 @@ async fn main() {
 
     let workspace = KeyExpr::new("workspace").unwrap();
     let name = KeyExpr::new("name").unwrap();
-    let data = ZSharedValue::new(&session, Value::default(), &workspace, name.clone()).unwrap();
+    let data = ZSharedValue::new(&session, Value(42), &workspace, name.clone()).unwrap();
     let view = ZSharedView::<Value, Change>::new(&session, &workspace, name.clone()).unwrap();
 
     let mut stdin = async_std::io::stdin();
