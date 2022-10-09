@@ -1,7 +1,7 @@
 use async_std::io::ReadExt;
 use serde::{Deserialize, Serialize};
 use zenoh::prelude::{r#async::AsyncResolve, Config, KeyExpr};
-use zshare::{get_data_path, get_update_path, Update, ZSharedValue, ZSharedView};
+use zshare::{get_data_path, get_update_path, Update, ZSharedValue, ZSharedView, INSTANCE_ID};
 
 #[derive(Default, Serialize, Deserialize)]
 struct Value(u64);
@@ -33,12 +33,12 @@ async fn main() -> zshare::Result<()> {
     let workspace = KeyExpr::new("workspace")?;
     let name = KeyExpr::new("name")?;
     let data = ZSharedValue::new(&session, Value(42), &workspace, name.clone())?;
-    let view = ZSharedView::<Value, Change>::new(&session, &workspace, name.clone())?;
+    let view = ZSharedView::<Value, Change>::new(&session, &workspace, INSTANCE_ID.clone(), name.clone())?;
 
     println!(
         "Commands: p, i, d, q\n{}\n{}",
-        get_data_path(&workspace, &name)?,
-        get_update_path(&workspace, &name)?
+        get_data_path(&workspace, &INSTANCE_ID, &name)?,
+        get_update_path(&workspace, &INSTANCE_ID, &name)?
     );
     let mut stdin = async_std::io::stdin();
     let mut input = [0_u8];

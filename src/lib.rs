@@ -26,7 +26,10 @@ use zenoh::subscriber::Subscriber;
 use zenoh::{prelude::KeyExpr, Session};
 
 lazy_static! {
-    pub static ref INSTANCE_ID: String = Uuid::new_v4().as_hyphenated().to_string();
+    pub static ref INSTANCE_ID: KeyExpr<'static> = {
+        let uuid = Uuid::new_v4().as_hyphenated().to_string();
+        unsafe { KeyExpr::from_string_unchecked(uuid) }
+    };
 }
 
 pub trait Update {
@@ -34,18 +37,20 @@ pub trait Update {
     fn update(&mut self, command: Self::Command);
 }
 
-pub fn get_data_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    Ok(workspace
-        .join(&name)?
-        .join(INSTANCE_ID.as_str())?
-        .join("data")?)
+pub fn get_data_path(
+    workspace: &KeyExpr,
+    instance: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(name)?.join(instance)?.join("data")?)
 }
 
-pub fn get_update_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    Ok(workspace
-        .join(&name)?
-        .join(INSTANCE_ID.as_str())?
-        .join("update")?)
+pub fn get_update_path(
+    workspace: &KeyExpr,
+    instance: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(&name)?.join(instance)?.join("update")?)
 }
 
 pub struct ZSharedValue<
@@ -73,8 +78,8 @@ impl<
         name: KeyExpr<'a>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(data));
-        let data_path = get_data_path(&workspace, &name)?;
-        let update_path = get_update_path(&workspace, &name)?;
+        let data_path = get_data_path(&workspace, &INSTANCE_ID, &name)?;
+        let update_path = get_update_path(&workspace, &INSTANCE_ID, &name)?;
         let callback = {
             let data = data.clone();
             move |query: Query| {
@@ -122,6 +127,7 @@ pub struct ZSharedView<
     COMMAND: DeserializeOwned,
 > {
     data: Arc<RwLock<DATA>>,
+    instance: KeyExpr<'a>,
     name: KeyExpr<'a>,
     _subscriber: Subscriber<'a, ()>,
 }
@@ -132,10 +138,15 @@ impl<
         COMMAND: DeserializeOwned,
     > ZSharedView<'a, DATA, COMMAND>
 {
-    pub fn new(zsession: &'a Session, workspace: &KeyExpr, name: KeyExpr<'static>) -> Result<Self> {
+    pub fn new(
+        zsession: &'a Session,
+        workspace: &KeyExpr,
+        instance: KeyExpr<'static>,
+        name: KeyExpr<'static>,
+    ) -> Result<Self> {
         let data = Arc::new(RwLock::new(DATA::default()));
-        let data_path = get_data_path(&workspace, &name)?;
-        let update_path = get_update_path(&workspace, &name)?;
+        let data_path = get_data_path(&workspace, &instance, &name)?;
+        let update_path = get_update_path(&workspace, &instance, &name)?;
         let update_callback = {
             let data = data.clone();
             move |sample: Sample| {
@@ -162,6 +173,7 @@ impl<
         }
         Ok(Self {
             data,
+            instance,
             name,
             _subscriber,
         })
@@ -173,5 +185,8 @@ impl<
 
     pub fn name(&self) -> &KeyExpr {
         &self.name
+    }
+    pub fn instance(&self) -> &KeyExpr {
+        &&self.instance
     }
 }
