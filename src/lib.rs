@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use uuid::Uuid;
+use zenoh::prelude::r#async::AsyncResolve;
 use zenoh::prelude::sync::SyncResolve;
 use zenoh::prelude::SplitBuffer;
 use zenoh::publication::Publisher;
@@ -137,7 +138,7 @@ impl<
     pub fn update(&self, command: COMMAND) {
         let mut buf = Vec::new();
         command.serialize(&mut Serializer::new(&mut buf)).unwrap();
-        self.publisher.put(buf).res().unwrap();
+        self.publisher.put(buf).res_sync().unwrap();
         let mut data = self.data.write().unwrap();
         data.update(command);
     }
@@ -222,6 +223,27 @@ pub fn query_instances(
     let query = zsession.get(path).res_sync()?;
     let mut res = Vec::new();
     while let Ok(reply) = query.recv() {
+        if let Ok(sample) = reply.sample {
+            let buf = sample.payload.contiguous();
+            if let Ok(s) = from_utf8(&buf) {
+                if let Ok(keyexpr) = KeyExpr::from_str(s) {
+                    res.push(keyexpr);
+                }
+            }
+        }
+    }
+    Ok(res)
+}
+
+pub async fn query_instances_async<'a>(
+    zsession: &'a Session,
+    workspace: &'a KeyExpr<'a>,
+    name: &'a KeyExpr<'a>,
+) -> Result<Vec<KeyExpr<'static>>> {
+    let path = get_instance_path(workspace, &STAR, name)?;
+    let query = zsession.get(path).res_async().await?;
+    let mut res = Vec::new();
+    while let Ok(reply) = query.recv_async().await {
         if let Ok(sample) = reply.sample {
             let buf = sample.payload.contiguous();
             if let Ok(s) = from_utf8(&buf) {
