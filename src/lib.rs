@@ -12,6 +12,8 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use std::marker::PhantomData;
+use std::str::from_utf8;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
@@ -26,10 +28,11 @@ use zenoh::subscriber::Subscriber;
 use zenoh::{prelude::KeyExpr, Session};
 
 lazy_static! {
-    pub static ref INSTANCE_ID: KeyExpr<'static> = {
+    pub static ref INSTANCE: KeyExpr<'static> = {
         let uuid = Uuid::new_v4().as_hyphenated().to_string();
         unsafe { KeyExpr::from_string_unchecked(uuid) }
     };
+    static ref STAR: KeyExpr<'static> = unsafe { KeyExpr::from_str_uncheckend("*") };
 }
 
 pub trait Update {
@@ -53,6 +56,14 @@ pub fn get_update_path(
     Ok(workspace.join(&name)?.join(instance)?.join("update")?)
 }
 
+pub fn get_instance_path(
+    workspace: &KeyExpr,
+    instance: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(&name)?.join(instance)?.join("instance")?)
+}
+
 pub struct ZSharedValue<
     'a,
     DATA: Update<Command = COMMAND> + Serialize + Send + Sync + 'static,
@@ -61,7 +72,8 @@ pub struct ZSharedValue<
     data: Arc<RwLock<DATA>>,
     name: KeyExpr<'a>,
     publisher: Publisher<'a>,
-    _queryable: Queryable<'a, ()>,
+    _queryable_data: Queryable<'a, ()>,
+    _queryable_instance: Queryable<'a, ()>,
     _command: PhantomData<COMMAND>,
 }
 
@@ -78,9 +90,10 @@ impl<
         name: KeyExpr<'a>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(data));
-        let data_path = get_data_path(&workspace, &INSTANCE_ID, &name)?;
-        let update_path = get_update_path(&workspace, &INSTANCE_ID, &name)?;
-        let callback = {
+        let data_path = get_data_path(&workspace, &INSTANCE, &name)?;
+        let update_path = get_update_path(&workspace, &INSTANCE, &name)?;
+        let instance_path = get_instance_path(&workspace, &INSTANCE, &name)?;
+        let data_callback = {
             let data = data.clone();
             move |query: Query| {
                 let data = data.read().unwrap();
@@ -90,16 +103,25 @@ impl<
                 query.reply(Ok(sample)).res_sync().unwrap();
             }
         };
-        let _queryable = zsession
+        let instance_callback = move |query: Query| {
+            let sample = Sample::new(query.key_expr().clone(), INSTANCE.as_str().as_bytes());
+            query.reply(Ok(sample)).res_sync().unwrap();
+        };
+        let _queryable_data = zsession
             .declare_queryable(&data_path)
-            .callback(callback)
+            .callback(data_callback)
+            .res_sync()?;
+        let _queryable_instance = zsession
+            .declare_queryable(&instance_path)
+            .callback(instance_callback)
             .res_sync()?;
         let publisher = zsession.declare_publisher(update_path).res_sync()?;
         Ok(Self {
             data,
             name,
             publisher,
-            _queryable,
+            _queryable_data,
+            _queryable_instance,
             _command: PhantomData::default(),
         })
     }
@@ -189,4 +211,25 @@ impl<
     pub fn instance(&self) -> &KeyExpr {
         &&self.instance
     }
+}
+
+pub fn query_instances(
+    zsession: &Session,
+    workspace: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<Vec<KeyExpr<'static>>> {
+    let path = get_instance_path(workspace, &STAR, name)?;
+    let query = zsession.get(path).res_sync()?;
+    let mut res = Vec::new();
+    while let Ok(reply) = query.recv() {
+        if let Ok(sample) = reply.sample {
+            let buf = sample.payload.contiguous();
+            if let Ok(s) = from_utf8(&buf) {
+                if let Ok(keyexpr) = KeyExpr::from_str(s) {
+                    res.push(keyexpr);
+                }
+            }
+        }
+    }
+    Ok(res)
 }
