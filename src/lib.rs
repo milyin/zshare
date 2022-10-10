@@ -12,10 +12,13 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use std::marker::PhantomData;
+use std::str::from_utf8;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::RwLockReadGuard;
 use uuid::Uuid;
+use zenoh::prelude::r#async::AsyncResolve;
 use zenoh::prelude::sync::SyncResolve;
 use zenoh::prelude::SplitBuffer;
 use zenoh::publication::Publisher;
@@ -26,11 +29,11 @@ use zenoh::subscriber::Subscriber;
 use zenoh::{prelude::KeyExpr, Session};
 
 lazy_static! {
-    pub static ref INSTANCE_ID: KeyExpr<'static> = Uuid::new_v4()
-        .as_hyphenated()
-        .to_string()
-        .try_into()
-        .unwrap();
+    pub static ref INSTANCE: KeyExpr<'static> = {
+        let uuid = Uuid::new_v4().as_hyphenated().to_string();
+        unsafe { KeyExpr::from_string_unchecked(uuid) }
+    };
+    static ref STAR: KeyExpr<'static> = unsafe { KeyExpr::from_str_uncheckend("*") };
 }
 
 pub trait Update {
@@ -38,20 +41,28 @@ pub trait Update {
     fn update(&mut self, command: Self::Command);
 }
 
-fn get_path(workspace: &KeyExpr, name: &KeyExpr, key: &str) -> Result<KeyExpr<'static>> {
-    Ok(workspace.join(&INSTANCE_ID)?.join(&name)?.join(key)?)
+pub fn get_data_path(
+    workspace: &KeyExpr,
+    instance: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(name)?.join(instance)?.join("data")?)
 }
 
-pub fn get_data_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    get_path(workspace, name, "data")
+pub fn get_update_path(
+    workspace: &KeyExpr,
+    instance: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(&name)?.join(instance)?.join("update")?)
 }
 
-pub fn get_update_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    get_path(workspace, name, "update")
-}
-
-pub fn get_id_path(workspace: &KeyExpr, name: &KeyExpr) -> Result<KeyExpr<'static>> {
-    get_path(workspace, name, "id")
+pub fn get_instance_path(
+    workspace: &KeyExpr,
+    instance: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<KeyExpr<'static>> {
+    Ok(workspace.join(&name)?.join(instance)?.join("instance")?)
 }
 
 pub struct ZSharedValue<
@@ -63,7 +74,7 @@ pub struct ZSharedValue<
     name: KeyExpr<'a>,
     publisher: Publisher<'a>,
     _queryable_data: Queryable<'a, ()>,
-    _queryable_id: Queryable<'a, ()>,
+    _queryable_instance: Queryable<'a, ()>,
     _command: PhantomData<COMMAND>,
 }
 
@@ -80,10 +91,10 @@ impl<
         name: KeyExpr<'a>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(data));
-        let data_path = get_data_path(&workspace, &name)?;
-        let update_path = get_update_path(&workspace, &name)?;
-        let id_path = get_id_path(&workspace, &name)?;
-        let callback_data = {
+        let data_path = get_data_path(&workspace, &INSTANCE, &name)?;
+        let update_path = get_update_path(&workspace, &INSTANCE, &name)?;
+        let instance_path = get_instance_path(&workspace, &INSTANCE, &name)?;
+        let data_callback = {
             let data = data.clone();
             move |query: Query| {
                 let data = data.read().unwrap();
@@ -93,17 +104,17 @@ impl<
                 query.reply(Ok(sample)).res_sync().unwrap();
             }
         };
-        let callback_id = move |query: Query| {
-            let sample = Sample::new(query.key_expr().clone(), INSTANCE_ID.as_bytes());
+        let instance_callback = move |query: Query| {
+            let sample = Sample::new(query.key_expr().clone(), INSTANCE.as_str().as_bytes());
             query.reply(Ok(sample)).res_sync().unwrap();
         };
         let _queryable_data = zsession
             .declare_queryable(&data_path)
-            .callback(callback_data)
+            .callback(data_callback)
             .res_sync()?;
-        let _queryable_id = zsession
-            .declare_queryable(&id_path)
-            .callback(callback_id)
+        let _queryable_instance = zsession
+            .declare_queryable(&instance_path)
+            .callback(instance_callback)
             .res_sync()?;
         let publisher = zsession.declare_publisher(update_path).res_sync()?;
         Ok(Self {
@@ -111,7 +122,7 @@ impl<
             name,
             publisher,
             _queryable_data,
-            _queryable_id,
+            _queryable_instance,
             _command: PhantomData::default(),
         })
     }
@@ -127,7 +138,7 @@ impl<
     pub fn update(&self, command: COMMAND) {
         let mut buf = Vec::new();
         command.serialize(&mut Serializer::new(&mut buf)).unwrap();
-        self.publisher.put(buf).res().unwrap();
+        self.publisher.put(buf).res_sync().unwrap();
         let mut data = self.data.write().unwrap();
         data.update(command);
     }
@@ -139,6 +150,7 @@ pub struct ZSharedView<
     COMMAND: DeserializeOwned,
 > {
     data: Arc<RwLock<DATA>>,
+    instance: KeyExpr<'a>,
     name: KeyExpr<'a>,
     _subscriber: Subscriber<'a, ()>,
 }
@@ -152,12 +164,12 @@ impl<
     pub fn new(
         zsession: &'a Session,
         workspace: &KeyExpr,
-        id: &KeyExpr,
+        instance: KeyExpr<'static>,
         name: KeyExpr<'static>,
     ) -> Result<Self> {
         let data = Arc::new(RwLock::new(DATA::default()));
-        let data_path = get_data_path(&workspace, &name)?;
-        let update_path = get_update_path(&workspace, &name)?;
+        let data_path = get_data_path(&workspace, &instance, &name)?;
+        let update_path = get_update_path(&workspace, &instance, &name)?;
         let update_callback = {
             let data = data.clone();
             move |sample: Sample| {
@@ -184,6 +196,7 @@ impl<
         }
         Ok(Self {
             data,
+            instance,
             name,
             _subscriber,
         })
@@ -196,4 +209,49 @@ impl<
     pub fn name(&self) -> &KeyExpr {
         &self.name
     }
+    pub fn instance(&self) -> &KeyExpr {
+        &&self.instance
+    }
+}
+
+pub fn query_instances(
+    zsession: &Session,
+    workspace: &KeyExpr,
+    name: &KeyExpr,
+) -> Result<Vec<KeyExpr<'static>>> {
+    let path = get_instance_path(workspace, &STAR, name)?;
+    let query = zsession.get(path).res_sync()?;
+    let mut res = Vec::new();
+    while let Ok(reply) = query.recv() {
+        if let Ok(sample) = reply.sample {
+            let buf = sample.payload.contiguous();
+            if let Ok(s) = from_utf8(&buf) {
+                if let Ok(keyexpr) = KeyExpr::from_str(s) {
+                    res.push(keyexpr);
+                }
+            }
+        }
+    }
+    Ok(res)
+}
+
+pub async fn query_instances_async<'a>(
+    zsession: &'a Session,
+    workspace: &'a KeyExpr<'a>,
+    name: &'a KeyExpr<'a>,
+) -> Result<Vec<KeyExpr<'static>>> {
+    let path = get_instance_path(workspace, &STAR, name)?;
+    let query = zsession.get(path).res_async().await?;
+    let mut res = Vec::new();
+    while let Ok(reply) = query.recv_async().await {
+        if let Ok(sample) = reply.sample {
+            let buf = sample.payload.contiguous();
+            if let Ok(s) = from_utf8(&buf) {
+                if let Ok(keyexpr) = KeyExpr::from_str(s) {
+                    res.push(keyexpr);
+                }
+            }
+        }
+    }
+    Ok(res)
 }
