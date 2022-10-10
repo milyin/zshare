@@ -29,11 +29,11 @@ impl Update for Value {
     }
 }
 
-fn refresh_views_sync<'a>(
+fn refresh_views_sync<'a, 'b>(
     session: &'a Session,
-    workspace: &KeyExpr<'a>,
-    name: &KeyExpr<'a>,
-    views: &mut Vec<ZSharedView<'a, Value, Change>>,
+    workspace: &KeyExpr,
+    name: &KeyExpr<'static>,
+    views: &'b mut Vec<ZSharedView<'a, Value, Change>>,
 ) -> Result<()> {
     let mut instances: HashSet<_> = ZSharedInstances::new(workspace, name)?
         .iter(session)?
@@ -65,37 +65,29 @@ async fn main() -> zshare::Result<()> {
     println!("Opening session...");
     let session = zenoh::open(Config::default()).res().await?;
     let mut views = Vec::new();
-    {
-        let q = &mut views;
-        q.clear();
-    }
-    {
-        let workspace = KeyExpr::new("workspace")?;
-        let name = KeyExpr::new("name")?;
-        let data = ZSharedValue::new(&session, Value(42), &workspace, name.clone())?;
-        refresh_views_sync(&session, &workspace, &name, &mut views)?;
-        // ZSharedView::<Value, Change>::new(&session, &workspace, INSTANCE.clone(), name.clone())?;
+    let workspace = KeyExpr::new("workspace")?;
+    let name = KeyExpr::new("name")?;
+    let data = ZSharedValue::new(&session, Value(42), &workspace, name.clone())?;
 
-        println!(
-            "Commands: (p)rint, (i)nc, (d)ec, (r)efresh, (q)uit\nKeys:\n{}\n{}\n{}",
-            get_instance_path(&workspace, &INSTANCE, &name)?,
-            get_data_path(&workspace, &INSTANCE, &name)?,
-            get_update_path(&workspace, &INSTANCE, &name)?
-        );
+    println!(
+        "Commands: (p)rint, (i)nc, (d)ec, (r)efresh, (q)uit\nKeys:\n{}\n{}\n{}",
+        get_instance_path(&workspace, &INSTANCE, &name)?,
+        get_data_path(&workspace, &INSTANCE, &name)?,
+        get_update_path(&workspace, &INSTANCE, &name)?
+    );
 
-        let mut stdin = async_std::io::stdin();
-        let mut input = [0_u8];
-        loop {
-            stdin.read_exact(&mut input).await.unwrap();
-            match input[0] {
-                b'q' => break,
-                b'i' => data.update(Change::Inc),
-                b'd' => data.update(Change::Dec),
-                // b'p' => print(&data, &views),
-                // b's' => refresh_views_sync(&session, &workspace, &name, &mut views)?,
-                _ => (),
-            }
+    let mut stdin = async_std::io::stdin();
+    let mut input = [0_u8];
+    loop {
+        stdin.read_exact(&mut input).await.unwrap();
+        match input[0] {
+            b'q' => break,
+            b'i' => data.update(Change::Inc),
+            b'd' => data.update(Change::Dec),
+            b'p' => print(&data, &views),
+            b'r' => refresh_views_sync(&session, &workspace, &name, &mut views)?,
+            _ => (),
         }
-        Ok(())
     }
+    Ok(())
 }

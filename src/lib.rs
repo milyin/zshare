@@ -274,7 +274,7 @@ impl<'a> Iterator for ZSharedInstancesIter<'a> {
     type Item = KeyExpr<'static>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Ok(reply) = self.query.try_recv() {
+        while let Ok(reply) = self.query.recv() {
             if let Ok(sample) = reply.sample {
                 let buf = sample.payload.contiguous();
                 if let Ok(s) = from_utf8(&buf) {
