@@ -1,9 +1,13 @@
 use async_std::io::ReadExt;
 use serde::{Deserialize, Serialize};
-use zenoh::prelude::{r#async::AsyncResolve, Config, KeyExpr};
+use std::collections::HashSet;
+use zenoh::{
+    prelude::{r#async::AsyncResolve, Config, KeyExpr},
+    Session,
+};
 use zshare::{
-    get_data_path, get_instance_path, get_update_path, query_instances_async, Update, ZSharedValue,
-    ZSharedView, INSTANCE,
+    get_data_path, get_instance_path, get_update_path, Result, Update, ZSharedInstances,
+    ZSharedValue, ZSharedView, INSTANCE,
 };
 
 #[derive(Default, Serialize, Deserialize)]
@@ -25,6 +29,34 @@ impl Update for Value {
     }
 }
 
+fn refresh_views_sync<'a>(
+    session: &'a Session,
+    workspace: &KeyExpr<'a>,
+    name: &KeyExpr<'a>,
+    views: &mut Vec<ZSharedView<'a, Value, Change>>,
+) -> Result<()> {
+    let mut instances: HashSet<_> = ZSharedInstances::new(workspace, name)?
+        .iter(session)?
+        .collect();
+    views.retain(|v| instances.remove(&v.instance().clone().into_owned()));
+    for instance in instances {
+        views.push(ZSharedView::new(
+            session,
+            workspace,
+            instance,
+            name.clone(),
+        )?)
+    }
+    Ok(())
+}
+
+fn print(value: &ZSharedValue<Value, Change>, views: &Vec<ZSharedView<Value, Change>>) {
+    println!("value {} {}", &INSTANCE.as_str(), value.read().0);
+    for v in views {
+        println!("view {} {}", v.instance(), v.read().0)
+    }
+}
+
 #[async_std::main]
 async fn main() -> zshare::Result<()> {
     // Initiate logging
@@ -32,42 +64,38 @@ async fn main() -> zshare::Result<()> {
 
     println!("Opening session...");
     let session = zenoh::open(Config::default()).res().await?;
-
-    let workspace = KeyExpr::new("workspace")?;
-    let name = KeyExpr::new("name")?;
-    let data = ZSharedValue::new(&session, Value(42), &workspace, name.clone())?;
-    let view =
-        ZSharedView::<Value, Change>::new(&session, &workspace, INSTANCE.clone(), name.clone())?;
-
-    println!(
-        "Commands: p, i, d, s, q\n{}\n{}\n{}",
-        get_instance_path(&workspace, &INSTANCE, &name)?,
-        get_data_path(&workspace, &INSTANCE, &name)?,
-        get_update_path(&workspace, &INSTANCE, &name)?
-    );
-
-    let mut stdin = async_std::io::stdin();
-    let mut input = [0_u8];
-    loop {
-        stdin.read_exact(&mut input).await.unwrap();
-        match input[0] {
-            b'q' => break,
-            b'i' => data.update(Change::Inc),
-            b'd' => data.update(Change::Dec),
-            b'p' => println!("{} {}", data.read().0, view.read().0),
-            b's' => {
-                let instances = query_instances_async(&session, &workspace, &name).await?;
-                if !instances.is_empty() {
-                    println!("Instances:");
-                    for v in &instances {
-                        println!("{}", v);
-                    }
-                }
-            },
-            _ => ()
-            // 0 => sleep(Duration::from_secs(1)).await,
-            // _ => subscriber.pull().res().await.unwrap(),
-        }
+    let mut views = Vec::new();
+    {
+        let q = &mut views;
+        q.clear();
     }
-    Ok(())
+    {
+        let workspace = KeyExpr::new("workspace")?;
+        let name = KeyExpr::new("name")?;
+        let data = ZSharedValue::new(&session, Value(42), &workspace, name.clone())?;
+        refresh_views_sync(&session, &workspace, &name, &mut views)?;
+        // ZSharedView::<Value, Change>::new(&session, &workspace, INSTANCE.clone(), name.clone())?;
+
+        println!(
+            "Commands: (p)rint, (i)nc, (d)ec, (r)efresh, (q)uit\nKeys:\n{}\n{}\n{}",
+            get_instance_path(&workspace, &INSTANCE, &name)?,
+            get_data_path(&workspace, &INSTANCE, &name)?,
+            get_update_path(&workspace, &INSTANCE, &name)?
+        );
+
+        let mut stdin = async_std::io::stdin();
+        let mut input = [0_u8];
+        loop {
+            stdin.read_exact(&mut input).await.unwrap();
+            match input[0] {
+                b'q' => break,
+                b'i' => data.update(Change::Inc),
+                b'd' => data.update(Change::Dec),
+                // b'p' => print(&data, &views),
+                // b's' => refresh_views_sync(&session, &workspace, &name, &mut views)?,
+                _ => (),
+            }
+        }
+        Ok(())
+    }
 }

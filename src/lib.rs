@@ -6,6 +6,7 @@ mod error;
 pub use error::Error;
 pub use error::Result;
 
+use flume::Receiver;
 use rmp_serde::Deserializer;
 use rmp_serde::Serializer;
 use serde::de::DeserializeOwned;
@@ -22,6 +23,7 @@ use zenoh::prelude::r#async::AsyncResolve;
 use zenoh::prelude::sync::SyncResolve;
 use zenoh::prelude::SplitBuffer;
 use zenoh::publication::Publisher;
+use zenoh::query::Reply;
 use zenoh::queryable::Query;
 use zenoh::queryable::Queryable;
 use zenoh::sample::Sample;
@@ -214,29 +216,76 @@ impl<
         &self.name
     }
     pub fn instance(&self) -> &KeyExpr {
-        &&self.instance
+        &self.instance
     }
 }
 
-pub fn query_instances(
-    zsession: &Session,
-    workspace: &KeyExpr,
-    name: &KeyExpr,
-) -> Result<Vec<KeyExpr<'static>>> {
-    let path = get_instance_path(workspace, &STAR, name)?;
-    let query = zsession.get(path).res_sync()?;
-    let mut res = Vec::new();
-    while let Ok(reply) = query.recv() {
-        if let Ok(sample) = reply.sample {
-            let buf = sample.payload.contiguous();
-            if let Ok(s) = from_utf8(&buf) {
-                if let Ok(keyexpr) = KeyExpr::from_str(s) {
-                    res.push(keyexpr);
+// pub fn query_instances(
+//     zsession: &Session,
+//     workspace: &KeyExpr,
+//     name: &KeyExpr,
+// ) -> Result<Vec<KeyExpr<'static>>> {
+//     let path = get_instance_path(workspace, &STAR, name)?;
+//     let query = zsession.get(path).res_sync()?;
+//     let mut res = Vec::new();
+//     while let Ok(reply) = query.recv() {
+//         if let Ok(sample) = reply.sample {
+//             let buf = sample.payload.contiguous();
+//             if let Ok(s) = from_utf8(&buf) {
+//                 if let Ok(keyexpr) = KeyExpr::from_str(s) {
+//                     res.push(keyexpr);
+//                 }
+//             }
+//         }
+//     }
+//     Ok(res)
+// }
+
+pub struct ZSharedInstances {
+    path: KeyExpr<'static>,
+}
+
+impl ZSharedInstances {
+    pub fn new(workspace: &KeyExpr, name: &KeyExpr) -> Result<Self> {
+        let path = get_instance_path(workspace, &STAR, name)?;
+        Ok(Self { path })
+    }
+    pub fn iter<'a>(&'a self, session: &'a Session) -> Result<ZSharedInstancesIter<'a>> {
+        ZSharedInstancesIter::new(session, &self.path)
+    }
+}
+
+pub struct ZSharedInstancesIter<'a> {
+    _session: &'a Session,
+    query: Receiver<Reply>,
+}
+
+impl<'a> ZSharedInstancesIter<'a> {
+    fn new(session: &'a Session, path: &'a KeyExpr<'a>) -> Result<Self> {
+        let query = session.get(path).res_sync()?;
+        Ok(Self {
+            _session: session,
+            query,
+        })
+    }
+}
+
+impl<'a> Iterator for ZSharedInstancesIter<'a> {
+    type Item = KeyExpr<'static>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Ok(reply) = self.query.try_recv() {
+            if let Ok(sample) = reply.sample {
+                let buf = sample.payload.contiguous();
+                if let Ok(s) = from_utf8(&buf) {
+                    if let Ok(keyexpr) = KeyExpr::from_str(s) {
+                        return Some(keyexpr);
+                    }
                 }
             }
         }
+        None
     }
-    Ok(res)
 }
 
 pub async fn query_instances_async<'a>(
