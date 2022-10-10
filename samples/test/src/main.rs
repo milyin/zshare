@@ -2,8 +2,8 @@ use async_std::io::ReadExt;
 use serde::{Deserialize, Serialize};
 use zenoh::prelude::{r#async::AsyncResolve, Config, KeyExpr};
 use zshare::{
-    get_data_path, get_update_path, query_instances, query_instances_async, Update, ZSharedValue,
-    ZSharedView, INSTANCE, get_instance_path,
+    get_data_path, get_instance_path, get_update_path, query_instances_async, Update, ZSharedValue,
+    ZSharedView, INSTANCE,
 };
 
 #[derive(Default, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ async fn main() -> zshare::Result<()> {
         ZSharedView::<Value, Change>::new(&session, &workspace, INSTANCE.clone(), name.clone())?;
 
     println!(
-        "Commands: p, i, d, q\n{}\n{}\n{}",
+        "Commands: p, i, d, s, q\n{}\n{}\n{}",
         get_instance_path(&workspace, &INSTANCE, &name)?,
         get_data_path(&workspace, &INSTANCE, &name)?,
         get_update_path(&workspace, &INSTANCE, &name)?

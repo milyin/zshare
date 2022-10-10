@@ -96,17 +96,21 @@ impl<
         let instance_path = get_instance_path(&workspace, &INSTANCE, &name)?;
         let data_callback = {
             let data = data.clone();
+            let data_path = data_path.clone();
             move |query: Query| {
                 let data = data.read().unwrap();
                 let mut buf = Vec::new();
                 data.serialize(&mut Serializer::new(&mut buf)).unwrap();
-                let sample = Sample::new(query.key_expr().clone(), buf);
+                let sample = Sample::new(data_path.clone(), buf);
                 query.reply(Ok(sample)).res_sync().unwrap();
             }
         };
-        let instance_callback = move |query: Query| {
-            let sample = Sample::new(query.key_expr().clone(), INSTANCE.as_str().as_bytes());
-            query.reply(Ok(sample)).res_sync().unwrap();
+        let instance_callback = {
+            let instance_path = instance_path.clone();
+            move |query: Query| {
+                let sample = Sample::new(instance_path.clone(), INSTANCE.as_str().as_bytes());
+                query.reply(Ok(sample)).res_sync().unwrap();
+            }
         };
         let _queryable_data = zsession
             .declare_queryable(&data_path)
