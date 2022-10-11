@@ -7,6 +7,7 @@ pub use error::Error;
 pub use error::Result;
 
 use flume::Receiver;
+use futures::Stream;
 use rmp_serde::Deserializer;
 use rmp_serde::Serializer;
 use serde::de::DeserializeOwned;
@@ -268,6 +269,24 @@ impl<'a> ZSharedInstancesIter<'a> {
             query,
         })
     }
+
+    async fn get_next(&mut self) -> Option<KeyExpr<'static>> {
+        while let Ok(reply) = self.query.recv_async().await {
+            if let Ok(sample) = reply.sample {
+                let buf = sample.payload.contiguous();
+                if let Ok(s) = from_utf8(&buf) {
+                    if let Ok(keyexpr) = KeyExpr::from_str(s) {
+                        return Some(keyexpr);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn into_stream(self) -> impl Stream<Item = KeyExpr<'static>> {
+        stream::unfold(
+    }
 }
 
 impl<'a> Iterator for ZSharedInstancesIter<'a> {
@@ -288,23 +307,23 @@ impl<'a> Iterator for ZSharedInstancesIter<'a> {
     }
 }
 
-pub async fn query_instances_async<'a>(
-    zsession: &'a Session,
-    workspace: &'a KeyExpr<'a>,
-    name: &'a KeyExpr<'a>,
-) -> Result<Vec<KeyExpr<'static>>> {
-    let path = get_instance_path(workspace, &STAR, name)?;
-    let query = zsession.get(path).res_async().await?;
-    let mut res = Vec::new();
-    while let Ok(reply) = query.recv_async().await {
-        if let Ok(sample) = reply.sample {
-            let buf = sample.payload.contiguous();
-            if let Ok(s) = from_utf8(&buf) {
-                if let Ok(keyexpr) = KeyExpr::from_str(s) {
-                    res.push(keyexpr);
-                }
-            }
-        }
-    }
-    Ok(res)
-}
+// pub async fn query_instances_async<'a>(
+//     zsession: &'a Session,
+//     workspace: &'a KeyExpr<'a>,
+//     name: &'a KeyExpr<'a>,
+// ) -> Result<Vec<KeyExpr<'static>>> {
+//     let path = get_instance_path(workspace, &STAR, name)?;
+//     let query = zsession.get(path).res_async().await?;
+//     let mut res = Vec::new();
+//     while let Ok(reply) = query.recv_async().await {
+//         if let Ok(sample) = reply.sample {
+//             let buf = sample.payload.contiguous();
+//             if let Ok(s) = from_utf8(&buf) {
+//                 if let Ok(keyexpr) = KeyExpr::from_str(s) {
+//                     res.push(keyexpr);
+//                 }
+//             }
+//         }
+//     }
+//     Ok(res)
+// }
